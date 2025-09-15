@@ -11,6 +11,80 @@ from algo.base import device, MAX_NORM
 from algo.base import get_model_params, set_client_from_params, get_acc_loss
 from .utils import SummaryWriter
 
+import matplotlib.pyplot as plt  
+from sklearn.manifold import TSNE  
+import matplotlib  
+matplotlib.use('Agg')  # Us
+
+def extract_features(model, data_x, data_y, device):  
+    model.eval()  
+    features = []  
+    labels = []  
+      
+    with torch.no_grad():  
+        for i in range(0, len(data_x), 100):  # Process in batches  
+            batch_x = torch.tensor(data_x[i:i+100]).to(device)  
+            batch_y = data_y[i:i+100]  
+              
+            # Extract features from fc1 layer (before final classification)  
+            x = model.conv1(batch_x)  
+            x = model.pool(torch.relu(x))  
+            if hasattr(model, 'bn1'):  
+                x = model.bn1(x)  
+            x = model.conv2(x)  
+            x = model.pool(torch.relu(x))  
+            if hasattr(model, 'bn2'):  
+                x = model.bn2(x)  
+            x = x.view(x.size(0), -1)  
+            x = torch.relu(model.fc1(x))  # Features from fc1 layer  
+              
+            features.append(x.cpu().numpy())  
+            labels.extend(batch_y)  
+      
+    return np.vstack(features), np.array(labels)
+
+
+def create_tsne_plot(features, labels, client_ids, save_path, round_num):  
+    # Apply t-SNE  
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)  
+    features_2d = tsne.fit_transform(features)  
+      
+    # Create plot  
+    plt.figure(figsize=(12, 8))  
+      
+    # Plot by client ID  
+    plt.subplot(1, 2, 1)  
+    unique_clients = np.unique(client_ids)  
+    colors = plt.cm.Set3(np.linspace(0, 1, len(unique_clients)))  
+      
+    for i, client_id in enumerate(unique_clients):  
+        mask = client_ids == client_id  
+        plt.scatter(features_2d[mask, 0], features_2d[mask, 1],   
+                   c=[colors[i]], label=f'Client {client_id}', alpha=0.7)  
+      
+    plt.title(f't-SNE by Client (Round {round_num})')  
+    plt.xlabel('t-SNE 1')  
+    plt.ylabel('t-SNE 2')  
+    plt.legend()  
+      
+    # Plot by class label  
+    plt.subplot(1, 2, 2)  
+    unique_labels = np.unique(labels)  
+    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))  
+      
+    for i, label in enumerate(unique_labels):  
+        mask = labels == label  
+        plt.scatter(features_2d[mask, 0], features_2d[mask, 1],   
+                   c=[colors[i]], label=f'Class {label}', alpha=0.7)  
+      
+    plt.title(f't-SNE by Class (Round {round_num})')  
+    plt.xlabel('t-SNE 1')  
+    plt.ylabel('t-SNE 2')  
+    plt.legend()  
+      
+    plt.tight_layout()  
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')  
+    plt.close()
 
 def train_model_fedavg(model, trn_x, trn_y, learning_rate, batch_size, epoch, weight_decay, dataset_name, sch_step=1, sch_gamma=1):
     n_trn = len(trn_x)
@@ -208,7 +282,31 @@ def train_FedAvg(args, data_obj, model_func, init_model):
                                'All clients': tst_perf_all[i][1]
                            }, i
                            )
-
+        # Add t-SNE visualization every 10 rounds or at the end  
+        if (i + 1) % 10 == 0 or i == com_amount - 1:  
+            print(f'Creating t-SNE visualization for round {i + 1}')  
+            
+            # Collect features from all clients  
+            all_features = []  
+            all_labels = []  
+            all_client_ids = []  
+            
+            for clnt in range(n_clnt):  
+                if len(clnt_x[clnt]) > 0:  # Only process clients with data  
+                    features, labels = extract_features(avg_model, clnt_x[clnt], clnt_y[clnt], device)  
+                    all_features.append(features)  
+                    all_labels.extend(labels)  
+                    all_client_ids.extend([clnt] * len(labels))  
+            
+            if all_features:  
+                all_features = np.vstack(all_features)  
+                all_labels = np.array(all_labels)  
+                all_client_ids = np.array(all_client_ids)  
+                
+                # Create t-SNE plot  
+                tsne_save_path = f'{result_path}Model/{data_obj.name}/{suffix}/tsne_round_{i+1}.png'  
+                create_tsne_plot(all_features, all_labels, all_client_ids, tsne_save_path, i + 1)  
+                print(f'Saved t-SNE plot to {tsne_save_path}')
         # Freeze model
         for params in avg_model.parameters():
             params.requires_grad = False
